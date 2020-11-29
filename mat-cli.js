@@ -6,8 +6,8 @@ const child_process = bluebird.promisifyAll(require('child_process'))
 const crypto = require('crypto')
 const spawn = require('child_process').spawn
 const docopt = require('docopt').docopt
-const GitHubApi = require('github')
-const mkdirp = bluebird.promisify(require('mkdirp'))
+const { Octokit } = require('@octokit/rest')
+const mkdirp = require('mkdirp')
 const request = require('request')
 const openpgp = require('openpgp')
 const username = require('username')
@@ -43,13 +43,13 @@ Usage:
 Options:
   --dev                 Developer Mode (do not use, dangerous, bypasses checks)
   --version=<version>   Specific version install [default: latest]
-  --mode=<mode>         mat installation mode (dedicated, addon, or cloud)
-  --user=<user>         User used for mat configuration [default: ${currentUser}]
+  --mode=<mode>         MAT installation mode (dedicated, addon, or cloud)
+  --user=<user>         User used for MAT configuration [default: ${currentUser}]
   --no-cache            Ignore the cache, always download the release files
   --verbose             Display verbose logging
 `
 
-const saltstackVersion = '3000'
+const saltstackVersion = '3001'
 const pubKey = `
 -----BEGIN PGP PUBLIC KEY BLOCK-----
 Version: GnuPG
@@ -115,8 +115,9 @@ a bit later might lead to good results.
 
 To determine the nature of the issue, please review the
 saltstack.log file under /var/cache/mat/cli in the
-subdirectory that matches the mat version you're installing.
-Pay particular attention to lines that start with [ERROR].
+subdirectory that matches the MAT version you're installing.
+Pay particular attention to lines that start with [ERROR], or
+which come before the line "result: false".
 
 `
 
@@ -125,14 +126,15 @@ let osCodename = null
 let cachePath = '/var/cache/mat/cli'
 let versionFile = '/etc/mat-version'
 let configFile = '/etc/mat-config'
+let releaseFile = '/etc/os-release'
 let matConfiguration = {}
 
-const validModes = ['dedicated', 'addon','cloud']
+const validModes = ['dedicated','addon','cloud']
 let isModeSpecified = false
 
 const cli = docopt(doc)
 
-const github = new GitHubApi({
+const github = new Octokit({
   version: '3.0.0',
   validateCache: true,
 })
@@ -150,6 +152,7 @@ const setup = async () => {
     cachePath = '/tmp/var/cache/mat'
     versionFile = '/tmp/mat-version'
     configFile = '/tmp/mat-config'
+    releaseFile = '/tmp/os-release'
   }
 
   await mkdirp(cachePath)
@@ -157,7 +160,7 @@ const setup = async () => {
 
 const validOS = async () => {
   try {
-    const contents = fs.readFileSync('/etc/os-release', 'utf8')
+    const contents = fs.readFileSync(releaseFile, 'utf8')
 
     if (contents.indexOf('UBUNTU_CODENAME=bionic') !== -1) {
       osVersion = '18.04'
@@ -165,10 +168,15 @@ const validOS = async () => {
       return true
     }
 
+    if (contents.indexOf('UBUNTU_CODENAME=focal') !== -1) {
+      osVersion = '20.04'
+      osCodename = 'focal'
+      return true
+    }
     throw new Error('Invalid OS or unable to determine Ubuntu version')
   } catch (err) {
     if (err && err.code === 'ENOENT') {
-      throw new Error('invalid OS, missing /etc/os-release')
+      throw new Error('invalid OS, missing ${releaseFile}')
     }
 
     throw err
@@ -225,7 +233,7 @@ const saltCheckVersion = (path, value) => {
 const setupSalt = async () => {
   if (cli['--dev'] === false) {
     const aptSourceList = '/etc/apt/sources.list.d/saltstack.list'
-    const aptDebString = `deb [arch=amd64] http://repo.saltstack.com/apt/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`
+    const aptDebString = `deb [arch=amd64] http://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`
 
     const aptExists = await fileExists(aptSourceList)
     const saltExists = await fileExists('/usr/bin/salt-call')
@@ -235,16 +243,26 @@ const setupSalt = async () => {
       console.log('NOTICE: Fixing incorrect SaltStack version configuration.')
       console.log('Installing and configuring SaltStack...')
       await child_process.execAsync('apt-get remove -y --allow-change-held-packages salt-minion salt-common')
-      await fs.writeFileAsync(aptSourceList, `deb [arch=amd64] http://repo.saltstack.com/apt/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`)
-      await child_process.execAsync(`wget -O - https://repo.saltstack.com/apt/ubuntu/${osVersion}/amd64/${saltstackVersion}/SALTSTACK-GPG-KEY.pub | apt-key add -`)
+      await fs.writeFileAsync(aptSourceList, `deb [arch=amd64] http://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`)
+      await child_process.execAsync(`wget -O - https://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion}/SALTSTACK-GPG-KEY.pub | apt-key add -`)
       await child_process.execAsync('apt-get update')
-      await child_process.execAsync('apt-get install -y --allow-change-held-packages salt-minion')
+      await child_process.execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
+        env: {
+          ...process.env,
+          DEBIAN_FRONTEND: 'noninteractive',
+        },
+      })
     } else if (aptExists === false || saltExists === false) {
       console.log('Installing and configuring SaltStack...')
-      await fs.writeFileAsync(aptSourceList, `deb [arch=amd64] http://repo.saltstack.com/apt/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`)
-      await child_process.execAsync(`wget -O - https://repo.saltstack.com/apt/ubuntu/${osVersion}/amd64/${saltstackVersion}/SALTSTACK-GPG-KEY.pub | apt-key add -`)
+      await fs.writeFileAsync(aptSourceList, `deb [arch=amd64] http://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`)
+      await child_process.execAsync(`wget -O - https://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion}/SALTSTACK-GPG-KEY.pub | apt-key add -`)
       await child_process.execAsync('apt-get update')
-      await child_process.execAsync('apt-get install -y --allow-change-held-packages salt-minion')
+      await child_process.execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
+        env: {
+          ...process.env,
+          DEBIAN_FRONTEND: 'noninteractive',
+        },
+      })
     }
   } else {
     return new Promise((resolve, reject) => {
@@ -262,16 +280,16 @@ const getCurrentVersion = () => {
     .then(contents => contents.toString().replace(/\n/g, ''))
 }
 
-const getReleases = () => {
-  return github.repos.getReleases({
-    owner: 'mat',
+const listReleases = () => {
+  return github.repos.listReleases({
+    owner: 'digitalsleuth',
     repo: 'mat-salt'
   })
 }
 
 const getValidReleases = async () => {
   const currentRelease = await getCurrentVersion()
-  let releases = await getReleases()
+  let releases = await listReleases()
   const realReleases = releases.data.filter(release => !Boolean(release.prerelease)).map(release => release.tag_name)
   const allReleases = releases.data.map(release => release.tag_name)
 
@@ -314,7 +332,7 @@ const isValidRelease = (version) => {
 const validateVersion = (version) => {
   return getValidReleases().then((releases) => {
     if (typeof releases.indexOf(version) === -1) {
-      throw new Error('The version you are attempting to install/upgrade is not valid.')
+      throw new Error('The version you are attempting to install/upgrade to is not valid.')
     }
     return new Promise((resolve) => { resolve() })
   })
@@ -457,7 +475,7 @@ const downloadUpdate = async (version) => {
   await mkdirp(`${cachePath}/${version}`)
   await downloadReleaseFile(version, `mat-salt-${version}.tar.gz.asc`)
   await downloadReleaseFile(version, `mat-salt-${version}.tar.gz.sha256`)
-  await downloadReleaseFile(version, `mat-salt-states-${version}.tar.gz.sha256.asc`)
+  await downloadReleaseFile(version, `mat-salt-${version}.tar.gz.sha256.asc`)
   await downloadRelease(version)
   await validateFile(version, `mat-salt-${version}.tar.gz`)
   await validateSignature(version, `mat-salt-${version}.tar.gz.sha256`)
@@ -484,7 +502,7 @@ const performUpdate = (version) => {
       cli['--mode'] = savedMode
 	    console.log(`> using previous mode: ${cli['--mode']}`)
     }  else {
-      console.log(`> no previous mat version found; performing a new 'dedicated' installation.`)
+      console.log(`> no previous MAT version found; performing a new 'dedicated' installation.`)
       cli['--mode'] = "dedicated"
     }
   }
@@ -547,7 +565,7 @@ const performUpdate = (version) => {
     })
     update.on('close', (code) => {
       if (code !== 0) {
-        return reject(new Error('Update returned exit code not zero'))
+        return reject(new Error('Update returned non-zero exit code'))
       }
 
       process.nextTick(resolve)
@@ -597,7 +615,7 @@ const summarizeResults = async (version) => {
   }
 
   console.log(`\n\n>> COMPLETED SUCCESSFULLY! Success: ${success}, Failure: ${failure}`)
-  console.log(`\n\n>> Please reboot to make sure all settings go into effect.`)
+  console.log(`\n\n>> Please reboot to make sure all settings take effect.`)
 }
 
 const saveConfiguration = (version) => {
@@ -698,7 +716,7 @@ ${yaml.safeDump(config)}
 
   if (cli['update'] === true) {
     if (version === 'notinstalled') {
-      throw new Error('mat is not installed, unable to update.')
+      throw new Error('MAT is not installed, unable to update.')
     }
 
     await downloadUpdate(version)
@@ -710,7 +728,7 @@ ${yaml.safeDump(config)}
     const currentVersion = await getCurrentVersion(versionFile)
 
     if (currentVersion !== 'notinstalled') {
-      console.log('mat is already installed, please use the \"update\" or \"upgrade\" command.')
+      console.log('MAT is already installed, please use the \"update\" or \"upgrade\" command.')
       return process.exit(0)
     }
 
@@ -721,7 +739,7 @@ ${yaml.safeDump(config)}
       const validRelease = await isValidRelease(cli['--version'])
 
       if (validRelease === false) {
-        console.log(`${cli['--version']} is not a mat valid release.`)
+        console.log(`${cli['--version']} is not a MAT valid release.`)
         return process.exit(5)
       }
 
