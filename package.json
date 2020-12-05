@@ -10,7 +10,7 @@
     "pkg:prep": "jo version=$(bash .ci/version) > config.json",
     "pkg:build": "pkg -t node12-linux --out-dir release package.json && cd release && mv mat-cli mat-cli-linux",
     "pkg:hash": "cd release && shasum -a 256 mat-cli-linux > mat-cli-linux.sha256",
-    "pkg:sign": "cd release && rm -f mat-cli-linux.sha256.asc && gpg --armor --clearsign --digest-algo SHA256 -u 28CD19DB mat-cli-linux.sha256 && rm mat-cli-linux.sha256",
+    "pkg:sign": "cd release && rm -f mat-cli-linux.sha256.asc && gpg --armor --clearsign --digest-algo SHA256 -u 4CF992E3 mat-cli-linux.sha256 && rm mat-cli-linux.sha256",
     "pkg": "npm run pkg:prep && npm run pkg:build && npm run pkg:hash && npm run pkg:sign"
   },
   "author": "Erik Kristensen <erik@erikkristensen.com>. Revised for MAT by Corey Forman.",
@@ -22,9 +22,9 @@
     "github": "14.0.0",
     "js-yaml": "3.14.0",
     "mkdirp": "1.0.4",
-    "openpgp": "4.10.7",
+    "openpgp": "4.10.8",
     "request": "2.88.2",
-    "semver": "7.3.2",
+    "semver": "7.3.4",
     "split": "1.0.1",
     "username": "5.1.0"
   },
