@@ -36,5 +36,9 @@
       "node_modules/github/lib/routes.json"
     ]
   },
+  "repository": {
+    "type" : "git",
+    "url" : "https://github.com/digitalsleuth/mat-cli.git"
+  },
   "false": {}
 }
