@@ -94,7 +94,7 @@ downloading packages, in which case retrying your operation
 a bit later might lead to good results.
 
 To determine the nature of the issue, please review the
-saltstack.log file under /var/cache/mat/cli/${version} in the
+saltstack.log file under /var/cache/mat/cli/ in the
 subdirectory that matches the MAT version you're installing.
 Pay particular attention to lines that start with [ERROR], or
 which come before the line "result: false".
