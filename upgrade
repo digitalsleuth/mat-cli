@@ -1,0 +1,13 @@
+# Update version number in package-lock.json and package.json
+git add .
+git commit -m ""
+git push origin
+
+npm run pkg #files from this go into the releases folder
+
+git tag v<version>
+git push origin v<version>
+
+# Go to the releases on github, edit, change title to also show version
+# Then add the contents of the releases folder to that release.
+

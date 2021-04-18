@@ -43,7 +43,7 @@ Usage:
 Options:
   --dev                 Developer Mode (do not use, dangerous, bypasses checks)
   --version=<version>   Specific version install [default: latest]
-  --mode=<mode>         MAT installation mode (dedicated, addon, or cloud)
+  --mode=<mode>         MAT installation mode (dedicated or addon, default: dedicated)
   --user=<user>         User used for MAT configuration [default: ${currentUser}]
   --no-cache            Ignore the cache, always download the release files
   --verbose             Display verbose logging
@@ -109,7 +109,7 @@ let configFile = '/etc/mat-config'
 let releaseFile = '/etc/os-release'
 let matConfiguration = {}
 
-const validModes = ['dedicated','addon','cloud']
+const validModes = ['dedicated','addon']
 let isModeSpecified = false
 
 const cli = docopt(doc)
@@ -169,7 +169,7 @@ const checkOptions = () => {
       throw new Error(`${cli['--mode']} is not a valid install mode. Valid modes are: ${validModes.join(', ')}`)
     }
     else {
-      isModeSpecified = true	  
+      isModeSpecified = true
     }
   }
 }
@@ -213,7 +213,7 @@ const saltCheckVersion = (path, value) => {
 const setupSalt = async () => {
   if (cli['--dev'] === false) {
     const aptSourceList = '/etc/apt/sources.list.d/saltstack.list'
-    const aptDebString = `deb [arch=amd64] http://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`
+    const aptDebString = `deb [signed-by=/usr/share/keyrings/salt-archive-keyring.gpg, arch=amd64] https://repo.saltproject.io/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`
 
     const aptExists = await fileExists(aptSourceList)
     const saltExists = await fileExists('/usr/bin/salt-call')
@@ -223,8 +223,8 @@ const setupSalt = async () => {
       console.log('NOTICE: Fixing incorrect SaltStack version configuration.')
       console.log('Installing and configuring SaltStack...')
       await child_process.execAsync('apt-get remove -y --allow-change-held-packages salt-minion salt-common')
-      await fs.writeFileAsync(aptSourceList, `deb [arch=amd64] http://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`)
-      await child_process.execAsync(`wget -O - https://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion}/SALTSTACK-GPG-KEY.pub | apt-key add -`)
+      await fs.writeFileAsync(aptSourceList, aptDebString)
+      await child_process.execAsync(`wget -O /usr/share/keyrings/salt-archive-keyring.gpg https://repo.saltproject.io/py3/ubuntu/${osVersion}/amd64/${saltstackVersion}/salt-archive-keyring.gpg`)
       await child_process.execAsync('apt-get update')
       await child_process.execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
         env: {
@@ -234,8 +234,8 @@ const setupSalt = async () => {
       })
     } else if (aptExists === false || saltExists === false) {
       console.log('Installing and configuring SaltStack...')
-      await fs.writeFileAsync(aptSourceList, `deb [arch=amd64] http://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`)
-      await child_process.execAsync(`wget -O - https://repo.saltstack.com/py3/ubuntu/${osVersion}/amd64/${saltstackVersion}/SALTSTACK-GPG-KEY.pub | apt-key add -`)
+      await fs.writeFileAsync(aptSourceList, aptDebString)
+      await child_process.execAsync(`wget -O /usr/share/keyrings/salt-archive-keyring.gpg https://repo.saltproject.io/py3/ubuntu/${osVersion}/amd64/${saltstackVersion}/salt-archive-keyring.gpg`)
       await child_process.execAsync('apt-get update')
       await child_process.execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
         env: {
@@ -472,8 +472,7 @@ const performUpdate = (version) => {
 
   const stateApplyMap = {
     'dedicated': 'mat.dedicated',
-    'addon': 'mat.addon',
-    'cloud': 'mat.cloud'
+    'addon': 'mat.addon'
   }
  
   if (!isModeSpecified) {
@@ -581,7 +580,8 @@ const summarizeResults = async (version) => {
     console.log(`\n\n>> Incomplete due to Failures -- Success: ${success}, Failure: ${failure}`)
     console.log(`\n>>>> List of Failures (first 10 only)`)
     console.log(`\n     NOTE: First failure is generally the root cause.`)
-    console.log(`\n     IMPORTANT: If seeking assistance, include this information.\n`)
+    console.log(`\n     IMPORTANT: If seeking assistance, include this information,\n`)
+    console.log(`\n     AND the /var/cache/mat/cli/${version}/saltstack.log.\n`)
     failures.sort((a, b) => {
       return a['__run_num__'] - b['__run_num__']
     }).slice(0, 10).forEach((key) => {
