@@ -49,7 +49,7 @@ Options:
   --verbose             Display verbose logging
 `
 
-const saltstackVersion = '3001'
+const saltstackVersion = '3003'
 const pubKey = `
 Version: GnuPG
 
