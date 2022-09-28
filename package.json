@@ -1,6 +1,6 @@
 {
   "name": "mat-cli",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Manage your MAT installation",
   "main": "mat-cli.js",
   "bin": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "pkg:prep": "jo version=$(bash .ci/version) > config.json",
-    "pkg:build": "pkg -t node12-linux --out-dir release package.json && cd release && mv mat-cli mat-cli-linux",
+    "pkg:build": "pkg -t node14-linux --out-dir release package.json && cd release && mv mat-cli mat-cli-linux",
     "pkg:hash": "cd release && shasum -a 256 mat-cli-linux > mat-cli-linux.sha256",
     "pkg:sign": "cd release && rm -f mat-cli-linux.sha256.asc && gpg --armor --clearsign --digest-algo SHA256 -u 4CF992E3 mat-cli-linux.sha256 && rm mat-cli-linux.sha256",
     "pkg": "npm run pkg:prep && npm run pkg:build && npm run pkg:hash && npm run pkg:sign"
