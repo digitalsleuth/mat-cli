@@ -23,7 +23,7 @@ Options:
 
 ## Issues
 
-You can open any issues at the [mat-cli repo](https://github.com/digitalsleuth/mat-cli/issues).
+You can open any issues [here](https://github.com/digitalsleuth/mat-cli/issues).
 
 ## Installation
 
@@ -42,5 +42,5 @@ This will only install the packages and necessary configurations to the current 
 
 ## Dedicated Mode
 
-This will install the full Toolkit into the current environment, desktop and all. The current desktop environment for MAT is Ubuntu Budgie. Icons and menus will be created, background and hostname will be
+This will install the full Toolkit into the current environment, desktop and all. Icons and menus will be created, background and hostname will be
 changed, and the ssh service will be stopped.
