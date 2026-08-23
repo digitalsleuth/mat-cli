@@ -1,41 +1,27 @@
 const cfg = require('./config.json')
-const bluebird = require('bluebird')
 const os = require('os')
-const fs = bluebird.promisifyAll(require('fs'))
-const child_process = bluebird.promisifyAll(require('child_process'))
+const fs = require('fs').promises
+const fsSync = require('fs')
+const child_process = require('child_process')
+const { promisify } = require('util')
 const crypto = require('crypto')
 const spawn = require('child_process').spawn
 const docopt = require('docopt').docopt
 const { Octokit } = require('@octokit/rest')
-const mkdirp = require('mkdirp')
-const request = require('request')
+const { mkdirp } = require('mkdirp')
 const openpgp = require('openpgp')
-const username = require('username')
 const readline = require('readline')
 const split = require('split')
-const semver = require('semver')
-
-/**
- * Setup Custom YAML Parsing
- */
+const execAsync = promisify(child_process.exec)
 const yaml = require('js-yaml')
-const PythonUnicodeType = new yaml.Type('tag:yaml.org,2002:python/unicode', {
-  kind: 'scalar',
-  construct: (data) => { return data !== null ? data : ''; }
-})
-const PYTHON_SCHEMA = new yaml.Schema({
-  include: [yaml.DEFAULT_SAFE_SCHEMA],
-  explicit: [PythonUnicodeType]
-})
-
-const currentUser = process.env.SUDO_USER || username.sync()
+const currentUser = process.env.SUDO_USER || os.userInfo().username
 
 const doc = `
 Usage:
   mat [options] list-upgrades [--pre-release]
   mat [options] install [--pre-release] [--version=<version>] [--mode=<mode>] [--user=<user>]
-  mat [options] update
   mat [options] upgrade [--pre-release] [--mode=<mode>] [--user=<user>]
+  mat [options] results [--version=<version>]
   mat [options] version
   mat [options] debug
   mat -h | --help | -v
@@ -49,7 +35,7 @@ Options:
   --verbose             Display verbose logging
 `
 
-const saltstackVersion = '3005'
+const saltstackVersion = '3006'
 const pubKey = `
 Version: GnuPG
 
@@ -85,21 +71,27 @@ T57/PvPUNcoRFdhJQE10ULU/64yw9DtNePM0qNrldyFc
 -----END PGP PUBLIC KEY BLOCK-----
 `
 
-const help = `
-
+const getHelpText = () => {
+  return `
 Try rebooting your system and trying the operation again.
 
 Sometimes problems occur due to network or server issues when
 downloading packages, in which case retrying your operation
-a bit later might lead to good results.
+a bit later might lead to a better result.
+Additionally, if you are operating behind a proxy, you may
+need to configure your environment to allow access through
+the proxy.
 
 To determine the nature of the issue, please review the
-saltstack.log file under /var/cache/mat/cli/ in the
-subdirectory that matches the MAT version you're installing.
+saltstack.log file under ${cfg.logPath}
+in the subdirectory that matches the MAT release version
+that you're installing.
+
 Pay particular attention to lines that start with [ERROR], or
 which come before the line "result: false".
-
 `
+};
+
 
 let osVersion = null
 let osCodename = null
@@ -123,7 +115,7 @@ const error = (err) => {
   console.log('')
   console.log(err.message)
   console.log(err.stack)
-  console.log(help)
+  console.log(getHelpText())
   process.exit(1)
 }
 
@@ -138,19 +130,25 @@ const setup = async () => {
   await mkdirp(cachePath)
 }
 
+
 const validOS = async () => {
   try {
-    const contents = fs.readFileSync(releaseFile, 'utf8')
+    const contents = await fs.readFile(releaseFile, 'utf8')
 
     if (contents.indexOf('UBUNTU_CODENAME=focal') !== -1) {
-      osVersion = '20.04'
-      osCodename = 'focal'
-      return true
+      console.log('Ubuntu Focal is no longer supported')
+      process.exit(1)
     }
 
     if (contents.indexOf('UBUNTU_CODENAME=jammy') !== -1) {
-      osVersion = '22.04'
-      osCodename = 'jammy'
+      return true
+    }
+
+    if (contents.indexOf('UBUNTU_CODENAME=noble') !== -1) {
+      return true
+    }
+
+    if (contents.indexOf('UBUNTU_CODENAME=resolute') !== -1) {
       return true
     }
 
@@ -164,6 +162,7 @@ const validOS = async () => {
   }
 }
 
+
 const checkOptions = () => {
   if (cli['--mode'] != null) {
     if (validModes.indexOf(cli['--mode']) === -1) {
@@ -175,47 +174,35 @@ const checkOptions = () => {
   }
 }
 
-const fileExists = (path) => {
-  return new Promise((resolve, reject) => {
-    fs.stat(path, (err, stats) => {
-      if (err && err.code === 'ENOENT') {
-        return resolve(false)
-      }
 
-      if (err) {
-        return reject(err)
-      }
-
-      return resolve(true)
-    })
-  })
+const fileExists = async (path) => {
+  try {
+    await fs.stat(path)
+    return true
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return false
+    }
+    throw err
+  }
 }
 
-const saltCheckVersion = (path, value) => {
-  return new Promise((resolve, reject) => {
-    fs.readFile(path, 'utf8', (err, contents) => {
-      if (err && err.code === 'ENOENT') {
-        return resolve(false);
-      }
-
-      if (err) {
-        return reject(err);
-      }
-
-      if (contents.indexOf(value) === 0) {
-        return resolve(true);
-      }
-
-      return resolve(false);
-    })
-  })
+const saltCheckVersion = async (path, value) => {
+  try {
+    const contents = await fs.readFile(path, 'utf8')
+    return contents.indexOf(value) === 0
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return false
+    }
+    throw err
+  }
 }
 
 const setupSalt = async () => {
   if (cli['--dev'] === false) {
-    const baseUrl = 'https://repo.saltproject.io/salt/py3/ubuntu'
     const aptSourceList = '/etc/apt/sources.list.d/saltstack.list'
-    const aptDebString = `deb [signed-by=/usr/share/keyrings/salt-archive-keyring.gpg, arch=amd64] ${baseUrl}/${osVersion}/amd64/${saltstackVersion} ${osCodename} main`
+    const aptDebString = `deb [signed-by=/usr/share/keyrings/salt-archive-keyring.pgp, arch=amd64] https://packages.broadcom.com/artifactory/saltproject-deb/ stable main`
 
     const aptExists = await fileExists(aptSourceList)
     const saltExists = await fileExists('/usr/bin/salt-call')
@@ -224,11 +211,12 @@ const setupSalt = async () => {
     if (aptExists === true && saltVersionOk === false) {
       console.log('NOTICE: Fixing incorrect SaltStack version configuration.')
       console.log('Installing and configuring SaltStack...')
-      await child_process.execAsync('apt-get remove -y --allow-change-held-packages salt-minion salt-common')
-      await fs.writeFileAsync(aptSourceList, aptDebString)
-      await child_process.execAsync(`wget -O /usr/share/keyrings/salt-archive-keyring.gpg ${baseUrl}/${osVersion}/amd64/${saltstackVersion}/salt-archive-keyring.gpg`)
-      await child_process.execAsync('apt-get update')
-      await child_process.execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
+      await execAsync('apt-get remove -y --allow-change-held-packages salt-minion salt-common')
+      await fs.writeFile(aptSourceList, aptDebString)
+      await execAsync(`wget -O /usr/share/keyrings/salt-archive-keyring.pgp https://packages.broadcom.com/artifactory/api/security/keypair/SaltProjectKey/public`)
+      await execAsync(`printf 'Package: salt-*\nPin: version ${saltstackVersion}.*\nPin-Priority: 1001' > /etc/apt/preferences.d/salt-pin-1001`)
+      await execAsync('apt-get update')
+      await execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
         env: {
           ...process.env,
           DEBIAN_FRONTEND: 'noninteractive',
@@ -236,10 +224,11 @@ const setupSalt = async () => {
       })
     } else if (aptExists === false || saltExists === false) {
       console.log('Installing and configuring SaltStack...')
-      await fs.writeFileAsync(aptSourceList, aptDebString)
-      await child_process.execAsync(`wget -O /usr/share/keyrings/salt-archive-keyring.gpg ${baseUrl}/${osVersion}/amd64/${saltstackVersion}/salt-archive-keyring.gpg`)
-      await child_process.execAsync('apt-get update')
-      await child_process.execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
+      await fs.writeFile(aptSourceList, aptDebString)
+      await execAsync(`wget -O /usr/share/keyrings/salt-archive-keyring.pgp https://packages.broadcom.com/artifactory/api/security/keypair/SaltProjectKey/public`)
+      await execAsync(`printf 'Package: salt-*\nPin: version ${saltstackVersion}.*\nPin-Priority: 1001' > /etc/apt/preferences.d/salt-pin-1001`)
+      await execAsync('apt-get update')
+      await execAsync('apt-get install -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y --allow-change-held-packages salt-common', {
         env: {
           ...process.env,
           DEBIAN_FRONTEND: 'noninteractive',
@@ -247,19 +236,20 @@ const setupSalt = async () => {
       })
     }
   } else {
-    return new Promise((resolve, reject) => {
-      resolve()
-    })
+    return Promise.resolve();
   }
 }
 
-const getCurrentVersion = () => {
-  return fs.readFileAsync(versionFile)
-    .catch((err) => {
-      if (err.code === 'ENOENT') return 'notinstalled'
-      if (err) throw err
-    })
-    .then(contents => contents.toString().replace(/\n/g, ''))
+const getCurrentVersion = async () => {
+  try {
+    const contents = await fs.readFile(versionFile)
+    return contents.toString().replace(/\n/g, '')
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return 'not installed'
+    }
+    throw err
+  }
 }
 
 const listReleases = () => {
@@ -296,90 +286,106 @@ const getValidReleases = async () => {
   })
 }
 
-const getLatestRelease = () => {
-  return getValidReleases().then(releases => releases[0])
+
+const getLatestRelease = async () => {
+  const releases = await getValidReleases()
+  return releases[0]
 }
 
-const isValidRelease = (version) => {
-  return getValidReleases().then((releases) => {
-    return new Promise((resolve, reject) => {
-      if (releases.indexOf(version) === -1) {
-        return resolve(false)
-      }
-      resolve(true)
-    })
-  })
+
+const isValidRelease = async (version) => {
+  const releases = await getValidReleases()
+  return releases.indexOf(version) !== -1
 }
 
-const validateVersion = (version) => {
-  return getValidReleases().then((releases) => {
-    if (typeof releases.indexOf(version) === -1) {
-      throw new Error('The version you are attempting to install/upgrade to is not valid.')
-    }
-    return new Promise((resolve) => { resolve() })
-  })
-}
 
-const downloadReleaseFile = (version, filename) => {
-  console.log(`>> downloading ${filename}`)
-
-  const filepath = `${cachePath}/${version}/${filename}`
-
-  if (fs.existsSync(filepath) && cli['--no-cache'] === false) {
-    return new Promise((resolve) => { resolve() })
+const validateVersion = async (version) => {
+  const releases = await getValidReleases()
+  if (releases.indexOf(version) === -1) {
+    throw new Error('The version you are attempting to install/upgrade to is not valid.')
   }
+}
 
+
+const downloadReleaseFile = async (version, filename) => {
+  console.log(`> downloading ${filename}`)
+
+  const filePath = `${cachePath}/${version}/${filename}`
+  const url = `https://github.com/digitalsleuth/mat-salt/releases/download/${version}/${filename}`
+  if (fsSync.existsSync(filePath) && cli['--no-cache'] === false) {
+    return Promise.resolve()
+  }
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  }
+  const output = fsSync.createWriteStream(filePath)
   return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(filepath)
-    const req = request.get(`https://github.com/digitalsleuth/mat-salt/releases/download/${version}/${filename}`)
-    req.on('error', (err) => {
-      reject(err)
-    })
-    req
-      .on('response', (res) => {
-        if (res.statusCode !== 200) {
-          throw new Error(res.body)
+    const reader = response.body.getReader()
+    const pump = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          output.write(value)
         }
-      })
-      .pipe(output)
-      .on('error', (err) => {
+        output.end()
+      } catch (err) {
+        output.destroy()
         reject(err)
-      })
-      .on('close', resolve)
-  })
-}
-
-const downloadRelease = (version) => {
-  console.log(`>> downloading mat-salt-${version}.tar.gz`)
-
-  const filepath = `${cachePath}/${version}/mat-salt-${version}.tar.gz`
-
-  if (fs.existsSync(filepath) && cli['--no-cache'] === false) {
-    return new Promise((resolve, reject) => { resolve() })
-  }
-
-  return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(filepath)
-    const req = request.get(`https://github.com/digitalsleuth/mat-salt/archive/${version}.tar.gz`)
-    req.on('error', (err) => {
+      }
+    }
+    output.on('error', (err) => {
       reject(err)
     })
-    req
-      .pipe(output)
-      .on('error', (err) => {
-        reject(err)
-      })
-      .on('close', resolve)
+    output.on('finish', () => {
+      resolve()
+    })
+    pump()
   })
 }
+
+
+const downloadRelease = async (version) => {
+  console.log(`> downloading mat-salt-${version}.tar.gz`)
+  const filePath = `${cachePath}/${version}/mat-salt-${version}.tar.gz`
+  if (fsSync.existsSync(filePath) && cli['--no-cache'] === false) {
+    return Promise.resolve()
+  }
+  const response = await fetch(`https://github.com/digitalsleuth/mat-salt/archive/${version}.tar.gz`)
+  if (!response.ok) {
+    throw new Error(`fetch error - status: ${response.status}`)
+  }
+  const output = fsSync.createWriteStream(filePath)
+  const reader = response.body.getReader()
+  return new Promise((resolve, reject) => {
+    const pump = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          output.write(value)
+        }
+        output.end()
+        resolve()
+      } catch (err) {
+        output.destroy()
+        reject(err)
+      }
+    }
+
+    output.on('error', reject)
+    pump()
+  })
+}
+
 
 const validateFile = async (version, filename) => {
   console.log(`> validating file ${filename}`)
-  const expected = await fs.readFileAsync(`${cachePath}/${version}/${filename}.sha256`)
-
+  const expected = await fs.readFile(`${cachePath}/${version}/${filename}.sha256`)
   const actual = await new Promise((resolve, reject) => {
     const shasum = crypto.createHash('sha256')
-    fs.createReadStream(`${cachePath}/${version}/${filename}`)
+    fsSync.createReadStream(`${cachePath}/${version}/${filename}`)
       .on('error', (err) => {
         reject(err)
       })
@@ -399,37 +405,36 @@ const validateFile = async (version, filename) => {
 const validateSignature = async (version, filename) => {
   console.log(`> validating signature for ${filename}`)
 
-  const filepath = `${cachePath}/${version}/${filename}`
-
-  const ctMessage = await fs.readFileAsync(`${filepath}`, 'utf8')
-  const ctSignature = await fs.readFileAsync(`${filepath}.asc`, 'utf8')
+  const filePath = `${cachePath}/${version}/${filename}`
+  const ctSignature = await fs.readFile(`${filePath}.asc`, 'utf8')
   const ctPubKey = pubKey
+  const publicKey = await openpgp.readKey({ armoredKey: ctPubKey })
+  const cleartextMessage = await openpgp.readCleartextMessage({ cleartextMessage: ctSignature })
+  const valid = await openpgp.verify({
+    message: cleartextMessage,
+    verificationKeys: publicKey
+  });
 
-  const options = {
-    message: await openpgp.cleartext.readArmored(ctSignature),
-    publicKeys: (await openpgp.key.readArmored(ctPubKey)).keys
-  }
-
-  const valid = await openpgp.verify(options)
-
-  if (typeof valid.signatures === 'undefined' && typeof valid.signatures[0] === 'undefined') {
+  if (!valid.signatures || valid.signatures.length === 0) {
     throw new Error('Invalid Signature')
   }
 
-  if (valid.signatures[0].valid === false) {
+  const isValid = await valid.signatures[0].verified
+  if (!isValid) {
     throw new Error('PGP Signature is not valid')
   }
 }
 
+
 const extractUpdate = (version, filename) => {
-  const filepath = `${cachePath}/${version}/${filename}`
+  const filePath = `${cachePath}/${version}/${filename}`
 
   return new Promise((resolve, reject) => {
     console.log(`> extracting update ${filename}`)
 
     let stdout = ''
     let stderr = ''
-    const extract = spawn('tar', ['-z', '-x', '-f', filepath, '-C', `${cachePath}/${version}`])
+    const extract = spawn('tar', ['-z', '-x', '-f', filePath, '-C', `${cachePath}/${version}`])
     extract.stdout.on('data', (data) => {
       stdout = `${stdout}${data}`
       console.log(data.toString())
@@ -451,6 +456,7 @@ const extractUpdate = (version, filename) => {
   })
 }
 
+
 const downloadUpdate = async (version) => {
   console.log(`> downloading ${version}`)
 
@@ -465,10 +471,10 @@ const downloadUpdate = async (version) => {
 }
 
 const performUpdate = (version) => {
-  const filepath = `${cachePath}/${version}/mat-salt-${version.replace('v', '')}`
-  const outputFilepath = `${cachePath}/${version}/results.yml`
-  const logFilepath = `${cachePath}/${version}/saltstack.log`
-
+  const filePath = `${cachePath}/${version}/mat-salt-${version.replace('v', '')}`
+  const outputFilePath = `${cachePath}/${version}/results.yml`
+  const logFilePath = `${cachePath}/${version}/saltstack.log`
+  cfg.logPath = logFilePath
   const begRegex = /Running state \[(.*)\] at time (.*)/g
   const endRegex = /Completed state \[(.*)\] at time (.*) duration_in_ms=(.*)/g
 
@@ -476,7 +482,7 @@ const performUpdate = (version) => {
     'dedicated': 'mat.dedicated',
     'addon': 'mat.addon'
   }
- 
+
   if (!isModeSpecified) {
     let savedMode = matConfiguration['mode']
     if (validModes.indexOf(savedMode) != -1) {
@@ -490,22 +496,20 @@ const performUpdate = (version) => {
 
   return new Promise((resolve, reject) => {
     console.log(`> upgrading/updating to ${version}`)
-
-    console.log(`>> Log file: ${logFilepath}`)
+    console.log(`> Log file: ${logFilePath}`)
 
     if (os.platform() !== 'linux') {
       console.log(`>>> Platform is not Linux`)
       return process.exit(0)
     }
 
-    let stdout = ''
     let stderr = ''
 
-    const logFile = fs.createWriteStream(logFilepath)
+    const logFile = fsSync.createWriteStream(logFilePath)
 
     const updateArgs = [
       '-l', 'debug', '--local',
-      '--file-root', filepath,
+      '--file-root', filePath,
       '--state-output=terse',
       '--out=yaml',
       'state.apply', stateApplyMap[cli['--mode']],
@@ -514,9 +518,8 @@ const performUpdate = (version) => {
 
     const update = spawn('salt-call', updateArgs)
 
-    update.stdout.pipe(fs.createWriteStream(outputFilepath))
+    update.stdout.pipe(fsSync.createWriteStream(outputFilePath))
     update.stdout.pipe(logFile)
-
     update.stderr.pipe(logFile)
     update.stderr
       .pipe(split())
@@ -527,92 +530,101 @@ const performUpdate = (version) => {
         const endMatch = endRegex.exec(data)
 
         if (begMatch !== null) {
-          process.stdout.write(`\n>> Running: ${begMatch[1]}\r`)
+          process.stdout.write(`\n> Running: ${begMatch[1]}\r`)
         } else if (endMatch !== null) {
-          let message = `>> Completed: ${endMatch[1]} (Took: ${endMatch[3]} ms)`
+          let message = `> Completed: ${endMatch[1]} (Took: ${endMatch[3]} ms)`
           if (process.stdout.isTTY === true) {
             readline.clearLine(process.stdout, 0)
             readline.cursorTo(process.stdout, 0)
           }
-
           process.stdout.write(`${message}`)
         }
       })
-
     update.on('error', (err) => {
       console.log(arguments)
-
       reject(err)
     })
     update.on('close', (code) => {
       if (code !== 0) {
-        return reject(new Error('Update returned non-zero exit code'))
+        return summarizeResults(version)
+          .then(() => {
+            reject(new Error(`Update returned non-zero exit code (${code})`));
+          })
+          .catch((err) => {
+            console.log('Failed to summarize results:', err);
+            reject(new Error(`Update returned non-zero exit code (${code}) and summary failed`));
+          });
       }
-
       process.nextTick(resolve)
     })
   })
 }
 
+
 const summarizeResults = async (version) => {
-  const outputFilepath = `${cachePath}/${version}/results.yml`
-  const rawContents = await fs.readFileAsync(outputFilepath)
-  let results = {}
+  const outputFilePath = `${cachePath}/${version}/results.yml`
+  if (await fileExists(outputFilePath)) {
+    const rawContents = await fs.readFile(outputFilePath, 'utf8')
+    let results = {}
 
-  try {
-    results = yaml.safeLoad(rawContents, { schema: PYTHON_SCHEMA })
-  } catch (err) {
-    // TODO handle?
-  }
+    results = yaml.load(rawContents)
 
-  let success = 0
-  let failure = 0
-  let failures = [];
-
-  Object.keys(results['local']).forEach((key) => {
-    if (results['local'][key]['result'] === true) {
-      success++
-    } else {
-      failure++
-      failures.push(results['local'][key])
-    }
-  })
-
-  if (failure > 0) {
-    console.log(`\n\n>> Incomplete due to Failures -- Success: ${success}, Failure: ${failure}`)
-    console.log(`\n>>>> List of Failures (first 10 only)`)
-    console.log(`\n     NOTE: First failure is generally the root cause.`)
-    console.log(`\n     IMPORTANT: If seeking assistance, include this information,\n`)
-    console.log(`\n     AND the /var/cache/mat/cli/${version}/saltstack.log.\n`)
-    failures.sort((a, b) => {
-      return a['__run_num__'] - b['__run_num__']
-    }).slice(0, 10).forEach((key) => {
-      console.log(`      - ID: ${key['__id__']}`)
-      console.log(`        SLS: ${key['__sls__']}`)
-      console.log(`        Run#: ${key['__run_num__']}`)
-      console.log(`        Comment: ${key['comment']}`)
+    let success = 0
+    let failure = 0
+    let failures = [];
+    Object.keys(results['local']).forEach((key) => {
+      if (results['local'][key]['result'] === true) {
+        success++
+      } else {
+        failure++
+        failures.push(results['local'][key])
+      }
     })
 
-    return new Promise((resolve, reject) => { return resolve() })
-  }
+    if (failure > 0) {
+      console.log(`\n> Incomplete due to failures -- Success: ${success}, Failure: ${failure}`)
+      console.log(`\r>>>> List of Failures (first 10 only)`)
+      console.log(`\r     NOTE: First failure is generally the root cause.`)
+      console.log(`\n     IMPORTANT: If seeking assistance, include this information,`)
+      console.log(`\r     AND the /var/cache/mat/cli/${version}/saltstack.log.\n`)
+      failures.sort((a, b) => {
+        return a['__run_num__'] - b['__run_num__']
+      }).slice(0, 10).forEach((key) => {
+        console.log(`      - ID: ${key['__id__']}`)
+        console.log(`        SLS: ${key['__sls__']}`)
+        console.log(`        Run#: ${key['__run_num__']}`)
+        console.log(`        Comment: ${key['comment']}`)
+      })
+      console.log('\r')
 
-  console.log(`\n\n>> COMPLETED SUCCESSFULLY! Success: ${success}, Failure: ${failure}`)
-  console.log(`\n\n>> Please reboot to make sure all settings take effect.`)
+      return Promise.resolve()
+    }
+
+    console.log(`\n>> COMPLETED SUCCESSFULLY! Success: ${success}, Failure: ${failure}`)
+    console.log(`\n>> Please reboot to make sure all settings take effect.`)
+  } else {
+    console.log(`The file ${outputFilePath} does not exist!\nIf using the "results" option make sure you specify the version with --version.`)
+    process.exit(1)
+  }
 }
+
 
 const saveConfiguration = (version) => {
   const config = {
     version: version,
     mode: cli['--mode'],
-    user: cli['--user']
+    user: cli['--user'],
+    outputPath: `${cachePath}/${version}/results.yml`,
+    logPath: `${cachePath}/${version}/saltstack.log`
   }
 
-  return fs.writeFileAsync(configFile, yaml.safeDump(config))
+  return fs.writeFile(configFile, yaml.dump(config))
 }
 
 const loadConfiguration = async () => {
   try {
-    return await fs.readFileAsync(configFile).then((c) => yaml.safeLoad(c))
+    const contents = await fs.readFile(configFile, 'utf8')
+    return yaml.load(contents)
   } catch (err) {
     if (err.code === 'ENOENT') {
       return {
@@ -620,10 +632,10 @@ const loadConfiguration = async () => {
         user: cli['--user']
       }
     }
-
     throw err
   }
 }
+
 
 const run = async () => {
   if (cli['-v'] === true) {
@@ -639,9 +651,9 @@ const run = async () => {
     const debug = `
 Version: ${cfg.version}
 User: ${currentUser}
-
+Log Path: ${cfg.logPath}
 Config:
-${yaml.safeDump(config)}
+${yaml.dump(config)}
 `
     console.log(debug)
     return process.exit(0)
@@ -666,7 +678,7 @@ ${yaml.safeDump(config)}
   matConfiguration = await loadConfiguration()
 
   const version = await getCurrentVersion()
-  console.log(`> mat-version: ${version}\n`)
+  console.log(`> mat-version: ${version}\r`)
 
   if (isModeSpecified) {
     console.log(`> mode: ${cli['--mode']}`)
@@ -694,23 +706,21 @@ ${yaml.safeDump(config)}
     return process.exit(1)
   }
 
-  await setupSalt()
-
-  if (cli['update'] === true) {
-    if (version === 'notinstalled') {
-      throw new Error('MAT is not installed, unable to update.')
-    }
-
-    await downloadUpdate(version)
-    await performUpdate(version)
-    await summarizeResults(version)
+  if (cli['results'] === true && cli['--version'] !== null && cli['--version'] !== 'latest') {
+    await summarizeResults(cli['--version'])
+    return process.exit(0)
+  }
+  else if (cli['results'] === true && cli['--version'] === 'latest') {
+    let latestVersion = await getLatestRelease()
+    await summarizeResults(latestVersion)
   }
 
+  await setupSalt()
   if (cli['install'] === true) {
     const currentVersion = await getCurrentVersion(versionFile)
 
-    if (currentVersion !== 'notinstalled') {
-      console.log('MAT is already installed, please use the \"update\" or \"upgrade\" command.')
+    if (currentVersion !== 'not installed') {
+      console.log('MAT is already installed, please use the "upgrade" command.')
       return process.exit(0)
     }
 
@@ -721,7 +731,7 @@ ${yaml.safeDump(config)}
       const validRelease = await isValidRelease(cli['--version'])
 
       if (validRelease === false) {
-        console.log(`${cli['--version']} is not a MAT valid release.`)
+        console.log(`${cli['--version']} is not a valid MAT release.`)
         return process.exit(5)
       }
 
@@ -732,11 +742,11 @@ ${yaml.safeDump(config)}
       throw new Error('versionToInstall was null, this should never happen.')
     }
 
+    await saveConfiguration(versionToInstall)
     await validateVersion(versionToInstall)
     await downloadUpdate(versionToInstall)
     await performUpdate(versionToInstall)
     await summarizeResults(versionToInstall)
-    await saveConfiguration(versionToInstall)
   }
 
   if (cli['upgrade'] === true) {
@@ -753,6 +763,7 @@ ${yaml.safeDump(config)}
     await summarizeResults(release)
   }
 }
+
 
 const main = async () => {
   try {
